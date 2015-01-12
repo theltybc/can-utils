@@ -68,6 +68,7 @@
 
 #define SETFNAME "sniffset."
 #define ANYDEV   "any"
+#define SNIFTABLEN 2048
 
 /* flags */
 
@@ -96,6 +97,9 @@
 
 struct snif {
 	int flags;
+	int iface;
+	int next_by_id;
+	int next_by_if;
 	long hold;
 	long timeout;
 	struct timeval laststamp;
@@ -104,7 +108,7 @@ struct snif {
 	struct can_frame current;
 	struct can_frame marker;
 	struct can_frame notch;
-} sniftab[2048];
+} sniftab[SNIFTABLEN];
 
 
 extern int optind, opterr, optopt;
@@ -125,7 +129,7 @@ void rx_setup (int fd, int id);
 void rx_delete (int fd, int id);
 void print_snifline(int id);
 int handle_keyb(int fd);
-int handle_bcm(int fd, long currcms);
+int handle_raw(int fd, long currcms);
 int handle_timeo(int fd, long currcms);
 void writesettings(char* name);
 void readsettings(char* name, int sockfd);
@@ -287,7 +291,8 @@ int main(int argc, char **argv)
 
 	interface = argv[optind];
 
-	if ((s = socket(PF_CAN, SOCK_DGRAM, CAN_BCM)) < 0) {
+	s = socket(PF_CAN, SOCK_RAW, CAN_RAW);
+	if (s < 0) {
 		perror("socket");
 		return 1;
 	}
@@ -305,14 +310,16 @@ int main(int argc, char **argv)
 	else
 		addr.can_ifindex = 0; /* any can interface */
 
-	if (connect(s, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+	if (bind(s, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
 		perror("connect");
 		return 1;
 	}
 
+#if 0
 	for (i=0; i < 2048 ;i++) /* initial BCM setup */
 		if (is_set(i, ENABLE))
 			rx_setup(s, i);
+#endif
 
 	gettimeofday(&start_tv, NULL);
 	tv.tv_sec = tv.tv_usec = 0;
@@ -341,7 +348,7 @@ int main(int argc, char **argv)
 			running &= handle_keyb(s);
 
 		if (FD_ISSET(s, &rdfs))
-			running &= handle_bcm(s, currcms);
+			running &= handle_raw(s, currcms);
 
 		if (currcms - lastcms >= loop) {
 			running &= handle_timeo(s, currcms);
@@ -490,34 +497,25 @@ int handle_keyb(int fd){
 	return 1; /* ok */
 };
 
-int handle_bcm(int fd, long currcms){
+int handle_raw(int fd, long currcms){
 
 	int nbytes, id;
+	struct can_frame cf;
 
-	struct {
-		struct bcm_msg_head msg_head;
-		struct can_frame frame;
-	} bmsg;
-
-	if ((nbytes = read(fd, &bmsg, sizeof(bmsg))) < 0) {
-		perror("bcm read");
+	if ((nbytes = read(fd, &cf, sizeof(cf))) < 0) {
+		perror("raw read");
 		return 0; /* quit */
 	}
 
-	id = bmsg.msg_head.can_id;
+	id = cf.can_id & 0x7FF;
 	ioctl(fd, SIOCGSTAMP, &sniftab[id].currstamp);
 
-	if (bmsg.msg_head.opcode != RX_CHANGED) {
-		printf("received strange BCM opcode %d!\n", bmsg.msg_head.opcode);
-		return 0; /* quit */
-	}
-
-	if (nbytes != sizeof(bmsg)) {
+	if (nbytes != sizeof(cf)) {
 		printf("received strange BCM data length %d!\n", nbytes);
 		return 0; /* quit */
 	}
 
-	sniftab[id].current = bmsg.frame;
+	sniftab[id].current = cf;
 	U64_DATA(&sniftab[id].marker) |= 
 		U64_DATA(&sniftab[id].current) ^ U64_DATA(&sniftab[id].last);
 	sniftab[id].timeout = (timeout)?(currcms + timeout):0;
@@ -604,10 +602,10 @@ void print_snifline(int id){
 	if (diffsec < 0)
 		diffsec = diffusec = 0;
 
-	if (diffsec > 10)
-		diffsec = 9, diffusec = 999999;
+	if (diffsec >= 100)
+		diffsec = 99, diffusec = 999999;
 
-	printf("%ld.%06ld  %3X  ", diffsec, diffusec, id);
+	printf("%02ld%03ld  %08X  ", diffsec, diffusec/1000, id);
 
 	if (binary) {
 
