@@ -60,7 +60,7 @@
 #include <net/if.h>
 
 #include <linux/can.h>
-#include <linux/can/bcm.h>
+#include <linux/can/raw.h>
 
 #include "terminal.h"
 
@@ -104,10 +104,10 @@ struct snif {
 	long timeout;
 	struct timeval laststamp;
 	struct timeval currstamp;
-	struct can_frame last;
-	struct can_frame current;
-	struct can_frame marker;
-	struct can_frame notch;
+	struct canfd_frame last;
+	struct canfd_frame current;
+	struct canfd_frame marker;
+	struct canfd_frame notch;
 } sniftab[SNIFTABLEN];
 
 
@@ -125,9 +125,7 @@ static unsigned char binary_gap;
 static unsigned char color;
 static char *interface;
 
-void rx_setup (int fd, int id);
-void rx_delete (int fd, int id);
-void print_snifline(int id);
+void print_snifline(canid_t id);
 int handle_keyb(int fd);
 int handle_raw(int fd, long currcms);
 int handle_timeo(int fd, long currcms);
@@ -196,6 +194,7 @@ int main(int argc, char **argv)
 	long lastcms = 0;
 	unsigned char quiet = 0;
 	int opt, ret;
+	const int canfd_on = 1;
 	struct timeval timeo, start_tv, tv;
 	struct sockaddr_can addr;
 	struct ifreq ifr;
@@ -310,6 +309,9 @@ int main(int argc, char **argv)
 	else
 		addr.can_ifindex = 0; /* any can interface */
 
+	/* try to switch the socket into CAN FD mode */
+	setsockopt(s, SOL_CAN_RAW, CAN_RAW_FD_FRAMES, &canfd_on, sizeof(canfd_on));
+
 	if (bind(s, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
 		perror("connect");
 		return 1;
@@ -362,42 +364,6 @@ int main(int argc, char **argv)
 	return 0;
 }
 
-void rx_setup (int fd, int id){
-
-	struct {
-		struct bcm_msg_head msg_head;
-		struct can_frame frame;
-	} txmsg;
-
-	txmsg.msg_head.opcode  = RX_SETUP;
-	txmsg.msg_head.can_id  = id;
-	txmsg.msg_head.flags   = RX_CHECK_DLC;
-	txmsg.msg_head.ival1.tv_sec  = 0;
-	txmsg.msg_head.ival1.tv_usec = 0;
-	txmsg.msg_head.ival2.tv_sec  = 0;
-	txmsg.msg_head.ival2.tv_usec = 0;
-	txmsg.msg_head.nframes = 1;
-	U64_DATA(&txmsg.frame) = (__u64) 0xFFFFFFFFFFFFFFFFULL;
-
-	if (filter_id_only)
-		txmsg.msg_head.flags |= RX_FILTER_ID;
-
-	if (write(fd, &txmsg, sizeof(txmsg)) < 0)
-		perror("write");
-};
-
-void rx_delete (int fd, int id){
-
-	struct bcm_msg_head msg_head;
-
-	msg_head.opcode  = RX_DELETE;
-	msg_head.can_id  = id;
-	msg_head.nframes = 0;
-
-	if (write(fd, &msg_head, sizeof(msg_head)) < 0)
-		perror("write");
-}
-
 int handle_keyb(int fd){
 
 	char cmd [20] = {0};
@@ -427,7 +393,7 @@ int handle_keyb(int fd){
 			for (i=0; i < 2048 ;i++) {
 				if (((i & mask) == (value & mask)) && (is_clr(i, ENABLE))) {
 					do_set(i, ENABLE);
-					rx_setup(fd, i);
+					//rx_setup(fd, i);
 				}
 			}
 		}
@@ -435,7 +401,7 @@ int handle_keyb(int fd){
 			for (i=0; i < 2048 ;i++) {
 				if (((i & mask) == (value & mask)) && (is_set(i, ENABLE))) {
 					do_clr(i, ENABLE);
-					rx_delete(fd, i);
+					//rx_delete(fd, i);
 				}
 			}
 		}
@@ -500,7 +466,7 @@ int handle_keyb(int fd){
 int handle_raw(int fd, long currcms){
 
 	int nbytes, id;
-	struct can_frame cf;
+	struct canfd_frame cf;
 
 	if ((nbytes = read(fd, &cf, sizeof(cf))) < 0) {
 		perror("raw read");
@@ -510,8 +476,8 @@ int handle_raw(int fd, long currcms){
 	id = cf.can_id & 0x7FF;
 	ioctl(fd, SIOCGSTAMP, &sniftab[id].currstamp);
 
-	if (nbytes != sizeof(cf)) {
-		printf("received strange BCM data length %d!\n", nbytes);
+	if ((nbytes != CAN_MTU) && (nbytes != CANFD_MTU)) {
+		printf("received strange frame data length %d!\n", nbytes);
 		return 0; /* quit */
 	}
 
@@ -589,11 +555,11 @@ int handle_timeo(int fd, long currcms){
 
 };
 
-void print_snifline(int id){
+void print_snifline(canid_t id){
 
 	long diffsec  = sniftab[id].currstamp.tv_sec  - sniftab[id].laststamp.tv_sec;
 	long diffusec = sniftab[id].currstamp.tv_usec - sniftab[id].laststamp.tv_usec;
-	int dlc_diff  = sniftab[id].last.can_dlc - sniftab[id].current.can_dlc;
+	int dlc_diff  = sniftab[id].last.len - sniftab[id].current.len;
 	int i,j;
 
 	if (diffusec < 0)
@@ -605,11 +571,14 @@ void print_snifline(int id){
 	if (diffsec >= 100)
 		diffsec = 99, diffusec = 999999;
 
-	printf("%02ld%03ld  %08X  ", diffsec, diffusec/1000, id);
+	if (id & CAN_EFF_FLAG)
+		printf("%02ld%03ld  %08X  ", diffsec, diffusec/1000, id & CAN_EFF_MASK);
+	else
+		printf("%02ld%03ld       %03X  ", diffsec, diffusec/1000, id & CAN_SFF_MASK);
 
 	if (binary) {
 
-		for (i=0; i<sniftab[id].current.can_dlc; i++) {
+		for (i=0; i<sniftab[id].current.len; i++) {
 			for (j=7; j>=0; j--) {
 				if ((color) && (sniftab[id].marker.data[i] & 1<<j) &&
 				    (!(sniftab[id].notch.data[i] & 1<<j)))
@@ -628,7 +597,7 @@ void print_snifline(int id){
 		}
 
 		/*
-		 * when the can_dlc decreased (dlc_diff > 0),
+		 * when the len decreased (dlc_diff > 0),
 		 * we need to blank the former data printout
 		 */
 		for (i=0; i<dlc_diff; i++) {
@@ -639,16 +608,16 @@ void print_snifline(int id){
 	}
 	else {
 
-		for (i=0; i<sniftab[id].current.can_dlc; i++)
+		for (i=0; i<sniftab[id].current.len; i++)
 			if ((color) && (sniftab[id].marker.data[i]) && (!(sniftab[id].notch.data[i])))
 				printf("%s%02X%s ", ATTCOLOR, sniftab[id].current.data[i], ATTRESET);
 			else
 				printf("%02X ", sniftab[id].current.data[i]);
 
-		if (sniftab[id].current.can_dlc < 8)
-			printf("%*s", (8 - sniftab[id].current.can_dlc) * 3, "");
+		if (sniftab[id].current.len < 8)
+			printf("%*s", (8 - sniftab[id].current.len) * 3, "");
 
-		for (i=0; i<sniftab[id].current.can_dlc; i++)
+		for (i=0; i<sniftab[id].current.len; i++)
 			if ((sniftab[id].current.data[i] > 0x1F) && 
 			    (sniftab[id].current.data[i] < 0x7F))
 				if ((color) && (sniftab[id].marker.data[i]) && (!(sniftab[id].notch.data[i])))
@@ -659,7 +628,7 @@ void print_snifline(int id){
 				putchar('.');
 
 		/*
-		 * when the can_dlc decreased (dlc_diff > 0),
+		 * when the len decreased (dlc_diff > 0),
 		 * we need to blank the former data printout
 		 */
 		for (i=0; i<dlc_diff; i++)
@@ -720,15 +689,15 @@ void readsettings(char* name, int sockfd){
 				if (buf[5] & 1) {
 					if (is_clr(i, ENABLE)) {
 						do_set(i, ENABLE);
-						if (sockfd)
-							rx_setup(sockfd, i);
+						//if (sockfd)
+							//rx_setup(sockfd, i);
 					}
 				}
 				else
 					if (is_set(i, ENABLE)) {
 						do_clr(i, ENABLE);
-						if (sockfd)
-							rx_delete(sockfd, i);
+						//if (sockfd)
+							//rx_delete(sockfd, i);
 					}
 				for (j=7; j>=0 ; j--){
 					sniftab[i].notch.data[j] =
