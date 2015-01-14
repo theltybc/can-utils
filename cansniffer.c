@@ -43,6 +43,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <unistd.h>
 #include <string.h>
 #include <fcntl.h>
@@ -68,7 +69,14 @@
 
 #define SETFNAME "sniffset."
 #define ANYDEV   "any"
-#define SNIFTABLEN 2048
+#define SNIFTABLENEXP 11 /* max. 16 due to u16 indices */
+#define SNIFTABLEN (1 << SNIFTABLENEXP) /* max. 2^16 due to u16 indices */
+#define EFFIDXTABLENEXP 10
+#define EFFIDXTABLEN (1 << EFFIDXTABLENEXP) /* idx pointers into sniftab for EFF */
+#define SFFIDXTABLEN (1 << CAN_SFF_ID_BITS)
+#define MAX_IFACE 4
+#define MAXCOL 6
+#define COLSTRSZ 20
 
 /* flags */
 
@@ -93,11 +101,21 @@
 
 #define ATTCOLOR ATTBOLD FGRED
 
-#define STARTLINESTR "XX delta   ID  data ... "
+#define BOLD    ATTBOLD
+#define RED     ATTBOLD FGRED
+#define GREEN   ATTBOLD FGGREEN
+#define YELLOW  ATTBOLD FGYELLOW
+#define BLUE    ATTBOLD FGBLUE
+#define MAGENTA ATTBOLD FGMAGENTA
+#define CYAN    ATTBOLD FGCYAN
 
-struct snif {
+const char col_on [MAXCOL][COLSTRSZ] = {BLUE, MAGENTA, RED, BOLD, GREEN, CYAN};
+
+#define STARTLINESTR "XX ms  ---ID---  data ... "
+
+static struct snif {
 	int flags;
-	int iface;
+	int ifnum;
 	int next_by_id;
 	int next_by_if;
 	long hold;
@@ -109,6 +127,16 @@ struct snif {
 	struct canfd_frame marker;
 	struct canfd_frame notch;
 } sniftab[SNIFTABLEN];
+
+static struct iface {
+	int ifindex;
+	char ifname[IFNAMSIZ];
+	char colorstr[COLSTRSZ];
+	uint16_t firstsffidx;
+	uint16_t firsteffidx;
+	uint16_t sff2idx[SFFIDXTABLEN];
+	uint16_t eff2idxstart[EFFIDXTABLEN];
+} ifacetab[MAX_IFACE];
 
 
 extern int optind, opterr, optopt;
@@ -123,7 +151,7 @@ static long loop = LOOP;
 static unsigned char binary;
 static unsigned char binary_gap;
 static unsigned char color;
-static char *interface;
+static char interface[4*(COLSTRSZ+IFNAMSIZ)];
 
 void print_snifline(canid_t id);
 int handle_keyb(int fd);
@@ -162,7 +190,7 @@ void print_usage(char *prg)
 		"\n"
 	};
 
-	fprintf(stderr, "\nUsage: %s [can-interface]\n", prg);
+	fprintf(stderr, "\nUsage: %s <can-interface> [<can-interface>*]\n", prg);
 	fprintf(stderr, "Options: -m <mask>  (initial FILTER default 0x00000000)\n");
 	fprintf(stderr, "         -v <value> (initial FILTER default 0x00000000)\n");
 	fprintf(stderr, "         -q         (quiet - all IDs deactivated)\n");
@@ -188,6 +216,7 @@ int main(int argc, char **argv)
 {
 	fd_set rdfs;
 	int s;
+	int num_ifaces = 0;
 	canid_t mask = 0;
 	canid_t value = 0;
 	long currcms = 0;
@@ -197,7 +226,6 @@ int main(int argc, char **argv)
 	const int canfd_on = 1;
 	struct timeval timeo, start_tv, tv;
 	struct sockaddr_can addr;
-	struct ifreq ifr;
 	int i;
 
 
@@ -265,30 +293,37 @@ int main(int argc, char **argv)
 		}
 	}
 
-	if (optind == argc) {
+	num_ifaces = argc - optind;
+	if ((optind == argc) || (num_ifaces > MAX_IFACE)) {
 		print_usage(basename(argv[0]));
 		exit(0);
 	}
-	
-	if (mask || value) {
-		for (i=0; i < 2048 ;i++) {
-			if ((i & mask) ==  (value & mask))
-				do_set(i, ENABLE);
-			else
-				do_clr(i, ENABLE);
+
+	/* fill interface table with up to MAX_IFACE interfaces */
+	for (i=0; i < num_ifaces; i++) {
+
+		if (strlen(argv[optind+i]) > IFNAMSIZ-1) {
+			printf("name of CAN device '%s' is too long!\n", argv[optind+i]);
+			return 1;
+		}
+
+		strcpy(ifacetab[i].ifname, argv[optind+i]);
+		ifacetab[i].ifindex = if_nametoindex(ifacetab[i].ifname);
+		if (!ifacetab[i].ifindex) {
+			printf("CAN device '%s' is not available!\n", argv[optind+i]);
+			return 1;
 		}
 	}
 
-	if (quiet)
-		for (i=0; i < 2048 ;i++)
-			do_clr(i, ENABLE);
-
-	if (strlen(argv[optind]) >= IFNAMSIZ) {
-		printf("name of CAN device '%s' is too long!\n", argv[optind]);
-		return 1;
-	}
-
-	interface = argv[optind];
+	if (num_ifaces > 1) {
+		for (i=0; i < num_ifaces; i++) {
+			snprintf(ifacetab[i].colorstr, COLSTRSZ, "%s", col_on[i]);
+			strcat(interface, ifacetab[i].colorstr);
+			strcat(interface, ifacetab[i].ifname);
+			strcat(interface, " " ATTRESET);
+		}
+	} else
+		sprintf(interface, "%s ", ifacetab[0].ifname);
 
 	s = socket(PF_CAN, SOCK_RAW, CAN_RAW);
 	if (s < 0) {
@@ -297,17 +332,7 @@ int main(int argc, char **argv)
 	}
 
 	addr.can_family = AF_CAN;
-
-	if (strcmp(ANYDEV, argv[optind])) {
-		strcpy(ifr.ifr_name, argv[optind]);
-		if (ioctl(s, SIOCGIFINDEX, &ifr) < 0) {
-			perror("SIOCGIFINDEX");
-			exit(1);
-		}
-		addr.can_ifindex = ifr.ifr_ifindex;
-	}
-	else
-		addr.can_ifindex = 0; /* any can interface */
+	addr.can_ifindex = 0; /* any can interface */
 
 	/* try to switch the socket into CAN FD mode */
 	setsockopt(s, SOL_CAN_RAW, CAN_RAW_FD_FRAMES, &canfd_on, sizeof(canfd_on));
@@ -502,10 +527,8 @@ int handle_timeo(int fd, long currcms){
 	static unsigned int frame_count;
 
 	if (clearscreen) {
-		char startline[80];
-		printf("%s%s", CLR_SCREEN, CSR_HOME);
-		snprintf(startline, 79, "< cansniffer %s # l=%ld h=%ld t=%ld >", interface, loop, hold, timeout);
-		printf("%s%*s",STARTLINESTR, 79-(int)strlen(STARTLINESTR), startline);
+		printf("%s%s%s    < %s# l=%ld h=%ld t=%ld >", CLR_SCREEN,
+		       CSR_HOME, STARTLINESTR, interface, loop, hold, timeout);
 		force_redraw = 1;
 		clearscreen = 0;
 	}
