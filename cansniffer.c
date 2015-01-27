@@ -502,6 +502,11 @@ int handle_raw(int fd, long currcms){
 		return 0; /* quit */
 	}
 
+	if (!print_eff && (cf.can_id & CAN_EFF_FLAG)) {
+		print_eff = 1;
+		clearscreen = 1;
+	}
+
 	id = cf.can_id & 0x7FF;
 	ioctl(fd, SIOCGSTAMP, &sniftab[id].currstamp);
 
