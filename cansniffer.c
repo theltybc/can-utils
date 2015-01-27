@@ -111,8 +111,6 @@
 
 const char col_on [MAXCOL][COLSTRSZ] = {BLUE, MAGENTA, RED, BOLD, GREEN, CYAN};
 
-#define STARTLINESTR "XX ms  ---ID---  data ... "
-
 static struct snif {
 	int flags;
 	int ifnum;
@@ -143,6 +141,7 @@ extern int optind, opterr, optopt;
 
 static int running = 1;
 static int clearscreen = 1;
+static int print_eff;
 static int notch;
 static int filter_id_only;
 static long timeout = TIMEOUT;
@@ -195,6 +194,7 @@ void print_usage(char *prg)
 	fprintf(stderr, "         -v <value> (initial FILTER default 0x00000000)\n");
 	fprintf(stderr, "         -q         (quiet - all IDs deactivated)\n");
 	fprintf(stderr, "         -r <name>  (read %sname from file)\n", SETFNAME);
+	fprintf(stderr, "         -e         (set extended frame format output)\n");
 	fprintf(stderr, "         -b         (start with binary mode)\n");
 	fprintf(stderr, "         -B         (start with binary mode with gap - exceeds 80 chars!)\n");
 	fprintf(stderr, "         -c         (color changes)\n");
@@ -236,7 +236,7 @@ int main(int argc, char **argv)
 	for (i=0; i < 2048 ;i++) /* default: check all CAN-IDs */
 		do_set(i, ENABLE);
 
-	while ((opt = getopt(argc, argv, "m:v:r:t:h:l:qbBcf?")) != -1) {
+	while ((opt = getopt(argc, argv, "m:v:r:t:h:l:qebBcf?")) != -1) {
 		switch (opt) {
 		case 'm':
 			sscanf(optarg, "%x", &mask);
@@ -264,6 +264,10 @@ int main(int argc, char **argv)
 
 		case 'q':
 			quiet = 1;
+			break;
+
+		case 'e':
+			print_eff = 1;
 			break;
 
 		case 'b':
@@ -527,8 +531,14 @@ int handle_timeo(int fd, long currcms){
 	static unsigned int frame_count;
 
 	if (clearscreen) {
-		printf("%s%s%s    < %s# l=%ld h=%ld t=%ld >", CLR_SCREEN,
-		       CSR_HOME, STARTLINESTR, interface, loop, hold, timeout);
+
+		if (print_eff)
+			printf("%s%sXX|ms  -- ID --  data ...     < %s# l=%ld h=%ld t=%ld >",
+			       CLR_SCREEN, CSR_HOME, interface, loop, hold, timeout);
+		else
+			printf("%s%sXX|ms  ID   data ...     < %s# l=%ld h=%ld t=%ld >",
+			       CLR_SCREEN, CSR_HOME, interface, loop, hold, timeout);
+
 		force_redraw = 1;
 		clearscreen = 0;
 	}
@@ -594,10 +604,14 @@ void print_snifline(canid_t id){
 	if (diffsec >= 100)
 		diffsec = 99, diffusec = 999999;
 
+	printf("%s", ifacetab[0].colorstr);
 	if (id & CAN_EFF_FLAG)
 		printf("%02ld%03ld  %08X  ", diffsec, diffusec/1000, id & CAN_EFF_MASK);
+	else if (print_eff)
+		printf("%02ld%03ld  ---- %03X  ", diffsec, diffusec/1000, id & CAN_SFF_MASK);
 	else
-		printf("%02ld%03ld       %03X  ", diffsec, diffusec/1000, id & CAN_SFF_MASK);
+		printf("%02ld%03ld  %03X  ", diffsec, diffusec/1000, id & CAN_SFF_MASK);
+	printf("%s", ATTRESET);
 
 	if (binary) {
 
