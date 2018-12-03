@@ -613,7 +613,7 @@ void print_snifline(canid_t id){
 	if (id & CAN_EFF_FLAG)
 		printf("%02ld%03ld  %08X  ", diffsec, diffusec/1000, id & CAN_EFF_MASK);
 	else if (print_eff)
-		printf("%02ld%03ld  ---- %03X  ", diffsec, diffusec/1000, id & CAN_SFF_MASK);
+		printf("%02ld%03ld  %08X  ", diffsec, diffusec/1000, sniftab[id].current.can_id & CAN_EFF_MASK);
 	else
 		printf("%02ld%03ld  %03X  ", diffsec, diffusec/1000, id & CAN_SFF_MASK);
 	printf("%s", ATTRESET);
